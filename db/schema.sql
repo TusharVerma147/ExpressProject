@@ -1,5 +1,5 @@
--- Students & Marks schema (replaces the older name/email + simple marks model).
--- Also keeps a minimal users table so the existing user module keeps working.
+-- Students, Marks, Auth & school scoping.
+-- Idempotent: safe to run `npm run db:migrate` more than once.
 -- Run: npm run db:migrate
 
 CREATE TABLE IF NOT EXISTS users (
@@ -9,6 +9,19 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Auth columns (added idempotently for existing DBs)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(20) NOT NULL DEFAULT 'user';
+
+-- Drop student link before recreating students (FK safety)
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_student_id_fkey;
+ALTER TABLE users DROP COLUMN IF EXISTS student_id;
+
+ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check;
+ALTER TABLE users ADD CONSTRAINT users_role_check
+  CHECK (role IN ('admin', 'user', 'moderator', 'teacher', 'student'));
+
+DROP TABLE IF EXISTS teacher_classes;
 DROP TABLE IF EXISTS marks;
 DROP TABLE IF EXISTS students;
 
@@ -39,6 +52,17 @@ CREATE TABLE marks (
   UNIQUE (student_id, exam, subject)
 );
 
+ALTER TABLE users ADD COLUMN IF NOT EXISTS student_id INTEGER NULL REFERENCES students(id);
+
+CREATE TABLE teacher_classes (
+  teacher_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  class_name      VARCHAR(2) NOT NULL,
+  section         CHAR(1) NOT NULL,
+  PRIMARY KEY (teacher_user_id, class_name, section)
+);
+
 CREATE INDEX IF NOT EXISTS idx_students_class_section ON students (class_name, section);
 CREATE INDEX IF NOT EXISTS idx_marks_student_id ON marks (student_id);
 CREATE INDEX IF NOT EXISTS idx_marks_subject ON marks (subject);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users (role);
+CREATE INDEX IF NOT EXISTS idx_users_student_id ON users (student_id);

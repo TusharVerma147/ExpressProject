@@ -1,6 +1,6 @@
-# Express Project — Users, Students & Marks
+# Express Project — Users, Students & Marks (Secured)
 
-Node.js + Express 5 + TypeScript + PostgreSQL (`pg`) + Zod validation.
+Node.js + Express 5 + TypeScript + PostgreSQL (`pg`) + Zod validation + JWT auth.
 
 ## Setup (first time)
 
@@ -15,6 +15,10 @@ DB_PASSWORD=postgres
 DB_NAME=express_db_connection
 PASS_PERCENTAGE=33.5
 ACADEMIC_YEAR=2026-27
+JWT_SECRET=dev-jwt-secret-change-me-32chars-min
+ACCESS_TOKEN_TTL_SECONDS=900
+CORS_ORIGINS=http://localhost:3000
+MARKS_RATE_LIMIT_MAX=60
 ```
 
 2. Install packages, create tables, start the server:
@@ -27,141 +31,106 @@ npm run dev
 
 Server: `http://localhost:3000`
 
-If `PASS_PERCENTAGE` or `ACADEMIC_YEAR` is missing/wrong, the app prints the problem and exits.
-
 ---
 
 ## How the code is organised (simple)
 
 ```
 Request
-  → middlewares (logger, JSON, reject dangerous keys)
-  → routes        (which URL?)
-  → controller    (HTTP only: read req, call service, send response)
-  → service       (business rules)
-  → repository    (SQL + map DB rows ↔ app objects)
+  → middlewares (cors, logger, JSON, reject dangerous keys)
+  → routes        (auth + requirePermission / requireAnyPermission)
+  → controller    (HTTP only)
+  → service       (business rules + canAccessStudent ownership)
+  → repository    (SQL)
   → PostgreSQL
 ```
 
-Each feature lives in one folder:
+---
 
-- `src/modules/student/` — student CRUD
-- `src/modules/mark/` — marks + averages
-- `src/modules/user/` — existing users API
+## 4. Authentication
 
-Errors are thrown (`notFound`, `conflict`, …) and handled once in `errorHandler`.
+- `POST /api/auth/register` — creates a plain `user` (no students/marks access)
+- `POST /api/auth/login` — returns a short-lived access token (~15 min)
+- `Authorization: Bearer <token>` required for students, marks, and admin routes
+- Role is **reloaded from the DB on every request** (JWT is not the source of truth for role)
+
+Admin linking (admin only):
+
+- `POST /api/admin/teacher-classes` `{ teacherUserId, className, section }`
+- `POST /api/admin/student-links` `{ userId, studentId }`
 
 ---
 
-## API overview
+## 5. Permissions
 
-Base path: `/api`
+Code checks **permissions**, never `role === '...'` outside `permissions.ts`.
 
-| Method | Path | What it does |
-|--------|------|----------------|
-| GET | `/health` | Health check |
-| GET/POST/PATCH/DELETE | `/users` … | User CRUD |
-| GET/POST/PATCH/DELETE | `/students` … | Student CRUD |
-| POST | `/students/:id/marks` | Add many subject marks for one exam |
-| GET/PATCH/DELETE | `/marks/:id` | One mark |
-| GET | `/marks/averages?className=10` | Subject averages + pass/fail |
+| Permission | admin | teacher | student |
+|---|---|---|---|
+| students:read:own | ✓ | - | ✓ |
+| students:read:class | ✓ | ✓ | - |
+| students:read:any | ✓ | - | - |
+| students:write:any | ✓ | - | - |
+| marks:read:own | ✓ | - | ✓ |
+| marks:read:class | ✓ | ✓ | - |
+| marks:read:any | ✓ | - | - |
+| marks:write:class | ✓ | ✓ | - |
+| marks:write:any | ✓ | - | - |
+| marks:averages:class | ✓ | ✓ | - |
+| marks:averages:any | ✓ | - | - |
 
-Successful responses look like `{ "data": ... }`.  
-Errors look like `{ "error": { "message": "...", "details": ... } }`.
+Ownership / class scope is decided in services via `canAccessStudent` (and list filtering).
+
+**B3 decisions**
+
+1. **LIST endpoints filter (not 403)** — a teacher/student only receives rows in scope; a blanket 403 would reveal that other data exists without showing it.
+2. **Single out-of-scope records use 403** — same status everywhere so clients can treat “authenticated but not allowed” consistently (averages for an untaught class also 403).
+
+### Curl examples
+
+Teacher (own classes):
+
+```bash
+TOKEN=... # Ms Rao
+curl -s http://localhost:3000/api/students \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Student (self only):
+
+```bash
+TOKEN=... # Priya
+curl -s http://localhost:3000/api/students/17 \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Forbidden (teacher reading another class):
+
+```bash
+TOKEN=... # Ms Rao
+curl -s -o /dev/null -w "%{http_code}\n" \
+  http://localhost:3000/api/students/23 \
+  -H "Authorization: Bearer $TOKEN"
+# → 403
+```
 
 ---
 
-## Students
+## 6. API security
 
-### Create — `POST /api/students`
-
-```bash
-curl -s -X POST http://localhost:3000/api/students \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "rollNo":"2026-10A-017",
-    "firstName":"Asha",
-    "lastName":"Sharma",
-    "dateOfBirth":"2015-05-15",
-    "className":"10",
-    "section":"A",
-    "guardian":{
-      "name":"Ravi Sharma",
-      "phone":"+919876543210",
-      "relation":"father"
-    }
-  }'
-```
-
-### List — `GET /api/students`
-
-Optional query: `className`, `section`, `search`, `limit`, `offset`.
-
-```bash
-curl -s 'http://localhost:3000/api/students?className=10&section=A'
-```
-
-### Get / Update / Delete
-
-```bash
-curl -s http://localhost:3000/api/students/1
-
-curl -s -X PATCH http://localhost:3000/api/students/1 \
-  -H 'Content-Type: application/json' \
-  -d '{"section":"B"}'
-
-curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://localhost:3000/api/students/1
-```
-
-Delete also removes that student’s marks (`ON DELETE CASCADE`).
-
----
-
-## Marks
-
-### Add marks for a student — `POST /api/students/:id/marks`
-
-```bash
-curl -s -X POST http://localhost:3000/api/students/1/marks \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "exam":"final",
-    "marks":[
-      {"subject":"maths","score":78.5,"maxScore":100},
-      {"subject":"english","score":66}
-    ]
-  }'
-```
-
-All marks in the request are saved together (one transaction). Duplicate exam+subject → **409**.
-
-### Update / Delete one mark
-
-```bash
-curl -s -X PATCH http://localhost:3000/api/marks/1 \
-  -H 'Content-Type: application/json' \
-  -d '{"score":80}'
-
-curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://localhost:3000/api/marks/1
-```
-
-### Subject averages — `GET /api/marks/averages`
-
-`className` is required. Optional: `exam`, `section`.
-
-```bash
-curl -s 'http://localhost:3000/api/marks/averages?className=10&exam=final'
-```
-
-Each subject gets `averagePercentage` and `passed` (compared to `PASS_PERCENTAGE` in `.env`).
+- Per-user rate limit on `POST /api/students/:id/marks` (`MARKS_RATE_LIMIT_MAX` / 10 minutes, keyed by `req.user.id`)
+- `Cache-Control: no-store` on `/api/auth`, `/api/students`, `/api/marks`
+- `CORS_ORIGINS="*"` fails at boot with a clear “allow-all is unsafe” message
+- Response `curl` helpers redact bearer tokens and passwords
 
 ---
 
 ## Useful scripts
 
 | Command | Purpose |
-|---------|---------|
+|---|---|
 | `npm run dev` | Start with auto-reload |
-| `npm run db:migrate` | Create / reset students + marks tables |
-| `npm run typecheck` | Check TypeScript |
+| `npm run db:migrate` | Apply `db/schema.sql` (idempotent) |
+| `npm run typecheck` | TypeScript check |
 | `npm run build` / `npm start` | Production build and run |
+| `npm test` | Vitest suite (auth, authorisation, API security) |

@@ -11,7 +11,47 @@ const requiredString = (name: string) =>
         : `${name} must be a string`,
   });
 
-const envSchema = z.object({
+/** Exact message asserted by tests/config.test.ts */
+export const CORS_WILDCARD_MESSAGE =
+  'CORS_ORIGINS cannot be "*" — allowing every origin lets any website read authenticated responses from a logged-in browser. List explicit origins instead (e.g. https://app.example.com).';
+
+const isAbsoluteHttpUrl = (value: string): boolean => {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
+const corsOriginsSchema = requiredString('CORS_ORIGINS')
+  .min(1, { error: 'CORS_ORIGINS is required but missing' })
+  .transform((value) =>
+    value
+      .split(',')
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0),
+  )
+  .superRefine((origins, ctx) => {
+    if (origins.length === 0) {
+      ctx.addIssue({ code: 'custom', message: 'CORS_ORIGINS must list at least one origin' });
+      return;
+    }
+    if (origins.includes('*')) {
+      ctx.addIssue({ code: 'custom', message: CORS_WILDCARD_MESSAGE });
+      return;
+    }
+    for (const origin of origins) {
+      if (!isAbsoluteHttpUrl(origin)) {
+        ctx.addIssue({
+          code: 'custom',
+          message: `CORS_ORIGINS entry "${origin}" must be a full URL (e.g. http://localhost:3000)`,
+        });
+      }
+    }
+  });
+
+export const envSchema = z.object({
   NODE_ENV: z.string().default('development'),
   PORT: z.coerce.number().int().positive().default(3000),
   DB_HOST: z.string().default('localhost'),
@@ -48,13 +88,22 @@ const envSchema = z.object({
           `ACADEMIC_YEAR: second year must follow the first (received "${String(iss.input)}")`,
       },
     ),
+  JWT_SECRET: requiredString('JWT_SECRET').min(32, {
+    error: 'JWT_SECRET must be at least 32 characters',
+  }),
+  ACCESS_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+  CORS_ORIGINS: corsOriginsSchema,
+  MARKS_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
 });
 
 export type Env = z.infer<typeof envSchema>;
 
+/** Parse without exiting — used by tests and validateConfig. */
+export const parseEnv = (raw: NodeJS.ProcessEnv = process.env) => envSchema.safeParse(raw);
+
 /** Check .env values. If something is wrong, print it and exit. */
 export const validateConfig = (): Env => {
-  const result = envSchema.safeParse(process.env);
+  const result = parseEnv();
   if (!result.success) {
     const issue = result.error.issues[0];
     const path = issue?.path.join('.') || 'config';

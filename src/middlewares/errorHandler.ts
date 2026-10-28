@@ -2,6 +2,7 @@ import type { ErrorRequestHandler } from 'express';
 import { ZodError } from 'zod';
 import { isProduction } from '../config/env';
 import { isAppError } from '../errors/APIError';
+import { buildCurl } from '../utils/http';
 
 export interface ValidationDetail {
   path: string;
@@ -18,36 +19,36 @@ export const zodDetails = (err: ZodError): ValidationDetail[] =>
 /**
  * The single place errors become HTTP responses. Express identifies it as an
  * error handler because it takes FOUR arguments.
- *
- * Express 5 forwards rejected promises from async handlers here automatically,
- * so controllers don't need try/catch.
  */
-export const errorHandler: ErrorRequestHandler = (err, _req, res, next) => {
+export const errorHandler: ErrorRequestHandler = (err, req, res, next) => {
   if (res.headersSent) {
     next(err);
     return;
   }
 
+  const curl = buildCurl(req);
+
   if (isAppError(err)) {
-    res.status(err.statusCode).json({ error: { message: err.message, details: err.details } });
+    res.status(err.statusCode).json({ error: { message: err.message, details: err.details }, curl });
     return;
   }
 
   if (err instanceof ZodError) {
     res.status(400).json({
       error: { message: 'Validation failed', details: zodDetails(err) },
+      curl,
     });
     return;
   }
 
-  // Malformed JSON body from express.json()
   if (err?.type === 'entity.parse.failed') {
-    res.status(400).json({ error: { message: 'Malformed JSON body' } });
+    res.status(400).json({ error: { message: 'Malformed JSON body' }, curl });
     return;
   }
 
   console.error('Unhandled error:', err);
   res.status(500).json({
     error: { message: isProduction ? 'Internal Server Error' : (err as Error).message },
+    curl,
   });
 };

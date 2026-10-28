@@ -1,4 +1,6 @@
+import cors from 'cors';
 import express from 'express';
+import { env } from './config/env';
 import { errorHandler } from './middlewares/errorHandler';
 import { notFoundHandler } from './middlewares/notFound';
 import { rejectDangerousPayload } from './middlewares/rejectDangerousPayload';
@@ -7,11 +9,16 @@ import routes from './routes';
 
 /**
  * Request lifecycle (middleware runs in registration order):
- *   requestLogger -> express.json -> rejectDangerousPayload -> /api routes -> notFound -> errorHandler
- * Any thrown error / rejected promise / next(err) jumps straight to errorHandler.
+ *   cors -> requestLogger -> express.json -> rejectDangerousPayload -> /api routes -> notFound -> errorHandler
  */
 const app = express();
 
+app.use(
+  cors({
+    origin: env.CORS_ORIGINS,
+    credentials: true,
+  }),
+);
 app.use(requestLogger);
 app.use(express.json({ limit: '100kb' }));
 app.use(rejectDangerousPayload);
